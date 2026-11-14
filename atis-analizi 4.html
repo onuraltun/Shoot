@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Atış Analizi</title>
+<style>
+:root{--bg:#111;--fg:#f4f4f4;--card:#1e1e1e;--ok:#3ddc84;--bad:#ff5252;--acc:#ff9800}
+@media (prefers-color-scheme: light){:root{--bg:#f5f5f5;--fg:#111;--card:#fff}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,sans-serif}
+main{max-width:640px;margin:0 auto;padding:12px}
+h1{font-size:20px;margin:4px 0 10px}
+#stage{position:relative;width:100%;background:#000;border-radius:12px;overflow:hidden;aspect-ratio:3/4}
+#v,#c{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+.row{display:flex;gap:8px;margin:10px 0;flex-wrap:wrap}
+button,select{flex:1;padding:12px;border-radius:10px;border:0;font-size:15px;background:var(--acc);color:#000;font-weight:600}
+select{background:var(--card);color:var(--fg)}
+.card{background:var(--card);border-radius:12px;padding:12px;margin-top:10px}
+.grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;text-align:center}
+.grid b{display:block;font-size:24px}
+.grid span{font-size:12px;opacity:.7}
+#fb div,#cap{padding:6px 0}
+#fb div{border-bottom:1px solid #8884}
+.ok{color:var(--ok)}.bad{color:var(--bad)}
+#status{font-size:13px;opacity:.8;margin:6px 0}
+canvas.fl{width:100%;height:auto;border-radius:8px;background:#000;margin-top:8px}
+#gd{background:#222}
+#sl{width:100%;margin:8px 0}
+.mini{padding:9px;font-size:14px}
+label.chk{display:flex;align-items:center;gap:6px;font-size:14px;flex:1}
+ol{padding-left:20px;margin:8px 0;font-size:14px;line-height:1.5}
+small{opacity:.75}
+</style>
+</head>
+<body>
+<main>
+<h1>🏀 Atış Analizi</h1>
+<div id="stage"><video id="v" playsinline muted></video><canvas id="c"></canvas></div>
+<div id="status">Hazır. “Kamerayı Başlat”a basın.</div>
+<div class="row">
+<button id="start">Kamerayı Başlat</button>
+<button id="flip" style="background:var(--card);color:var(--fg)">Ön/Arka kamera</button>
+</div>
+<div class="row">
+<select id="arm"><option value="right">Sağ elle atıyorum</option><option value="left">Sol elle atıyorum</option></select>
+<select id="view"><option value="side">Telefon yanda (yandan çekim)</option><option value="front">Telefon önde/arkada</option></select>
+</div>
+<div class="card"><div class="grid">
+<div><b id="eA">–</b><span>Dirsek açısı</span></div>
+<div><b id="kA">–</b><span>Diz açısı</span></div>
+<div><b id="sA">0</b><span>Atış sayısı</span></div>
+</div></div>
+
+<div class="card"><strong>Doğru atış nasıl olmalı?</strong>
+<canvas id="gd" class="fl" width="640" height="230"></canvas>
+<ol>
+<li><b>Hazırlık:</b> Ayaklar omuz genişliğinde, dizler hafif bükülü, top göğüste, dirsekler içeride.</li>
+<li><b>Çömelme:</b> Dizler 110–135° bükülür, gövde dik kalır.</li>
+<li><b>Atış cebi:</b> Dirsek 80–120°, önkol dikey, top atış omzunun hizasında ve başın önünde.</li>
+<li><b>Bırakma:</b> Bacak ve kol tam uzar, top başın üstünde bırakılır, bilek ileri kırılır, kol yukarıda kalır.</li>
+</ol></div>
+
+<div class="card"><strong>Son atış geri bildirimi</strong><div id="fb">Henüz atış algılanmadı. Telefonu sabitleyin, tüm vücut görünsün.</div></div>
+
+<div class="card" id="rp" style="display:none"><strong>Atış tekrarı</strong>
+<div class="row"><select id="shotSel"></select></div>
+<canvas id="rc" class="fl"></canvas>
+<div id="cap"></div>
+<input type="range" id="sl" min="0" max="0" value="0">
+<div class="row">
+<button class="mini" id="play">▶ Oynat</button>
+<select id="spd"><option value="0.25">0.25x</option><option value="0.5" selected>0.5x</option><option value="1">1x</option></select>
+</div>
+<div class="row">
+<label class="chk"><input type="checkbox" id="ghost" checked> Doğru hareketi göster</label>
+<button class="mini" id="dl">Videoyu indir</button>
+</div>
+<small><span style="color:#ff5252">■</span> senin hareketin &nbsp; <span style="color:#3ddc84">■</span> olması gereken konum, ok düzeltme yönünü gösterir</small>
+</div>
+</main>
+<script type="module">
+import {PoseLandmarker,FilesetResolver} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
+const $=id=>document.getElementById(id);
+const v=$("v"),c=$("c"),ctx=c.getContext("2d");
+let landmarker,facing="environment",stream,running=false,lastT=-1;
+let shots=0,armed=true,pending=false,snap=null,baseY=null,S={};
+const reset=()=>{S={minKnee:180,maxElbow:0,minWrist:180,minHipY:1,tDip:0,hipX0:null,noseX0:null,setT:0,setE:0,setTilt:90,hold:false}};reset();
+const ang=(a,b,p)=>{const r=Math.atan2(p.y-b.y,p.x-b.x)-Math.atan2(a.y-b.y,a.x-b.x);let d=Math.abs(r*180/Math.PI);return d>180?360-d:d};
+const tiltOf=(el,wr)=>Math.atan2(Math.abs(wr.x-el.x),Math.abs(wr.y-el.y))*180/Math.PI;
+
+async function init(){
+  $("status").textContent="Model yükleniyor…";
+  const fs=await FilesetResolver.forVisionTasks("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm");
+  landmarker=await PoseLandmarker.createFromOptions(fs,{
+    baseOptions:{modelAssetPath:"https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task",delegate:"GPU"},
+    runningMode:"VIDEO",numPoses:1});
+}
+async function cam(){
+  if(stream)stream.getTracks().forEach(t=>t.stop());
+  stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:facing,width:{ideal:1280},height:{ideal:720},frameRate:{ideal:60}},audio:false});
+  v.srcObject=stream;await v.play();c.width=v.videoWidth;c.height=v.videoHeight;
+}
+$("start").onclick=async()=>{
+  try{
+    if(!landmarker)await init();
+    await cam();
+    $("status").textContent="Çalışıyor. Atış yapın.";
+    if(!running){running=true;loop()}
+  }catch(e){$("status").textContent="Hata: "+e.message+" (sayfa HTTPS üzerinden açılmalı ve kamera izni verilmeli)"}
+};
+$("flip").onclick=async()=>{facing=facing==="user"?"environment":"user";if(running)await cam()};
+function loop(){
+  if(v.currentTime!==lastT&&v.videoWidth){
+    lastT=v.currentTime;
+    const res=landmarker.detectForVideo(v,performance.now());
+    ctx.clearRect(0,0,c.width,c.height);
+    if(res.landmarks[0])analyze(res.landmarks[0]);
+  }
+  requestAnimationFrame(loop);
+}
+function analyze(L){
+  const R=$("arm").value==="right";
+  const I=R?[12,14,16,24,26,28,20,11,15,27]:[11,13,15,23,25,27,19,12,16,28];
+  const [sh,el,wr,hp,kn,an,ix,sh2,wr2,an2]=I.map(i=>L[i]);
+  const nose=L[0],now=performance.now()/1000;
+  const eA=ang(sh,el,wr),kA=ang(hp,kn,an),wA=ang(el,wr,ix);
+  const torso=Math.hypot(sh.x-hp.x,sh.y-hp.y)||1,swid=Math.hypot(sh.x-sh2.x,sh.y-sh2.y)||.1;
+  pushFrame(now,{sh,el,wr,ix,hp,kn,an,nose,sh2,wr2,an2});
+  $("eA").textContent=Math.round(eA)+"°";$("kA").textContent=Math.round(kA)+"°";
+  const W=c.width,H=c.height;
+  ctx.lineWidth=5;ctx.lineCap="round";
+  [[sh,el],[el,wr],[wr,ix],[sh,hp],[hp,kn],[kn,an]].forEach(([x,y],i)=>{ctx.strokeStyle=i<3?"#ff9800":"#3ddc84";ctx.beginPath();ctx.moveTo(x.x*W,x.y*H);ctx.lineTo(y.x*W,y.y*H);ctx.stroke()});
+  [sh,el,wr,hp,kn,an].forEach(p=>{ctx.fillStyle="#fff";ctx.beginPath();ctx.arc(p.x*W,p.y*H,6,0,7);ctx.fill()});
+  ctx.fillStyle="#fff";ctx.font="bold 22px system-ui";
+  ctx.fillText(Math.round(eA)+"°",el.x*W+10,el.y*H);ctx.fillText(Math.round(kA)+"°",kn.x*W+10,kn.y*H);
+  if(armed){
+    if(kA>165){baseY=baseY==null?hp.y:baseY*.9+hp.y*.1;S.hipX0=hp.x;S.noseX0=nose.x}
+    if(kA<S.minKnee){S.minKnee=kA;S.tDip=now}
+    S.minHipY=Math.min(S.minHipY,hp.y);
+    if(wr.y<sh.y){
+      if(!S.setT){S.setT=now;S.setE=eA;S.setTilt=tiltOf(el,wr)}
+      S.maxElbow=Math.max(S.maxElbow,eA);S.minWrist=Math.min(S.minWrist,wA);
+    }
+    if(wr.y<sh.y-0.12&&eA>150){
+      snap={kA,eA,el,wr,sh,hp,nose,torso,swid,sh2,wr2,an,an2,t:now};
+      armed=false;pending=true;shots++;$("sA").textContent=shots;
+    }
+  }else{
+    if(pending){
+      S.minWrist=Math.min(S.minWrist,wA);S.hold=wr.y<sh.y-0.05;
+      if(now-snap.t>0.3){pending=false;report()}
+    }else if(wr.y>sh.y){armed=true;reset()}
+  }
+}
+function report(){
+  const q=snap,side=$("view").value==="side",k=S.minKnee,items=[];
+  const add=(ok,good,bad)=>items.push([ok,ok?good:bad]);
+  const drift=S.hipX0==null?0:Math.abs(q.hp.x-S.hipX0)/q.torso;
+  const jump=baseY==null?0:(baseY-S.minHipY)/q.torso;
+  const dt=q.t-S.tDip;
+  if(side){
+    add(k<=135,`Diz bükülmesi iyi (${Math.round(k)}°)`,`Dizlerini daha fazla bük (${Math.round(k)}°). Güç bacaklardan gelmeli.`);
+    add(q.kA>=160,`Bacaklar bırakmada tam uzandı (${Math.round(q.kA)}°)`,`Bırakma anında bacaklarını tam uzat (${Math.round(q.kA)}°).`);
+    add(q.eA>=160,`Kol tam uzandı (${Math.round(q.eA)}°)`,`Bırakmada kolunu tam uzat (${Math.round(q.eA)}°).`);
+    add(S.setE>=80&&S.setE<=120,`Atış cebinde dirsek açısı iyi (${Math.round(S.setE)}°)`,`Atış cebinde dirsek açın ${Math.round(S.setE)}°, 80–120° olmalı.`);
+    add(S.setTilt<=20,"Önkol dikey, top dirseğin üstünde","Önkolun yana yatık, dirseği topun altına getir ve önkolu dikey tut.");
+    const ra=Math.atan2(q.sh.y-q.wr.y,Math.abs(q.wr.x-q.sh.x))*180/Math.PI;
+    add(ra>=45&&ra<=75,`Atış açısı iyi (${Math.round(ra)}°)`,ra<45?`Kolun çok yatay gidiyor (${Math.round(ra)}°), topu daha yukarı doğru it.`:`Kolun çok dik (${Math.round(ra)}°), topu biraz ileri doğru it.`);
+    add(S.minWrist<=150,"Bilek ileri kırıldı (follow-through)","Bileğini ileri kır, atıştan sonra elin aşağı baksın.");
+    const lean=Math.atan2(Math.abs(q.sh.x-q.hp.x),Math.abs(q.sh.y-q.hp.y))*180/Math.PI;
+    add(lean<=12,`Gövde dik (${Math.round(lean)}°)`,`Gövden öne/arkaya eğiliyor (${Math.round(lean)}°), dik kal.`);
+    add(dt>=0.25&&dt<=1.0,`Hareket akıcı (${dt.toFixed(2)} sn)`,dt<0.25?"Atış çok aceleci, diz ve kol hareketini birleştir.":"Çömelmeden sonra çok bekliyorsun, hareketi akıcı yap.");
+  }else{
+    add(Math.abs(q.el.x-q.sh.x)/q.swid<0.5,"Dirsek omuz hizasında, dışarı açılmıyor","Dirseğin dışarı açılıyor, omuz hizasında ve topun altında tut.");
+    add(Math.abs(q.wr.x-q.sh.x)/q.swid<0.4,"Top atış omzunun hizasında","Top omuz hizandan yana kayıyor, atış omzuyla potayı aynı hatta tut.");
+    add(Math.abs(q.sh.y-q.sh2.y)/q.swid<0.25,"Omuzlar dengeli","Omuzların eğik, bırakırken omuz hattını düz tut.");
+    const fw=Math.abs(q.an.x-q.an2.x)/q.swid;
+    add(fw>=0.6&&fw<=1.8,"Ayak açıklığı uygun",fw<0.6?"Ayakların çok yakın, omuz genişliğinde aç.":"Ayakların çok açık, omuz genişliğinde tut.");
+  }
+  add(q.wr.y<q.nose.y-0.03,"Top yüksekte bırakıldı","Topu daha yüksekte, başının üstünde bırak.");
+  add(drift<0.35,"Denge iyi, yana/öne kayma az","Atış sırasında kalçan çok kayıyor, dengeni koru.");
+  add(jump>=0.04,"Yerden güç alındı (sıçrama var)","Bacak gücünü kullan, hafifçe yukarı sıçra.");
+  add(q.wr2.y>q.wr.y,"Yardımcı el atışa karışmıyor","Yardımcı elin topu itiyor olabilir, bırakmada elini çek.");
+  add(S.hold,"Kol atıştan sonra yukarıda kalıyor","Kolunu hemen indirme, top gidene kadar yukarıda tut.");
+  add(S.noseX0==null||Math.abs(q.nose.x-S.noseX0)/q.torso<0.3,"Baş sabit","Atış sırasında başın fazla hareket ediyor, gözün potada kalsın.");
+  saveClip(items,side);
+  const n=items.filter(i=>i[0]).length;
+  $("fb").innerHTML=`<div><strong>Puan: ${n}/${items.length}</strong></div>`+items.map(([ok,t])=>`<div class="${ok?"ok":"bad"}">${ok?"✔":"✖"} ${t}</div>`).join("");
+}
+
+// ---- kayıt ve tekrar ----
+let buf=[],store=[],cur=null,playing=false,tPos=0,lastTs=0,rec=null,chunks=[];
+const rc=$("rc"),rx=rc.getContext("2d");
+function pushFrame(t,P){
+  const f={t,P,bmp:null,keep:false};buf.push(f);
+  const h=Math.round(320*v.videoHeight/v.videoWidth);
+  createImageBitmap(v,{resizeWidth:320,resizeHeight:h,resizeQuality:"low"}).then(b=>{f.bmp=b;if(f.dead)b.close()}).catch(()=>{});
+  while(buf.length&&buf[0].t<t-3){const o=buf.shift();if(!o.keep){o.dead=true;if(o.bmp)o.bmp.close()}}
+}
+function saveClip(items,side){
+  const q=snap,frames=buf.filter(f=>f.t>=q.t-1.6&&f.bmp);
+  if(frames.length<5)return;
+  frames.forEach(f=>f.keep=true);
+  store.push({n:shots,frames,tRel:q.t,tDip:S.tDip||q.t-0.5,score:items.filter(i=>i[0]).length+"/"+items.length,view:side?"side":"front"});
+  while(store.length>3)store.shift().frames.forEach(f=>{f.dead=true;if(f.bmp)f.bmp.close()});
+  $("rp").style.display="block";
+  $("shotSel").innerHTML=store.map((o,i)=>`<option value="${i}">Atış ${o.n} (puan ${o.score})</option>`).join("");
+  $("shotSel").value=store.length-1;showShot(store.length-1);
+}
+function showShot(i){
+  cur=store[i];if(!cur)return;playing=false;$("play").textContent="▶ Oynat";
+  const b=cur.frames[0].bmp;rc.width=b.width;rc.height=b.height;
+  $("sl").max=cur.frames.length-1;$("sl").value=0;tPos=cur.frames[0].t;drawF(0);
+}
+const NAMES=["1. Hazırlık","2. Çömelme","3. Atış cebi","4. Bırakma","5. Takip"];
+function drawF(i){
+  const f=cur.frames[i],W=rc.width,H=rc.height,front=cur.view==="front",P=f.P,t=f.t;
+  rx.drawImage(f.bmp,0,0,W,H);
+  const g=k=>({x:P[k].x*W,y:P[k].y*H});
+  const sh=g("sh"),el=g("el"),wr=g("wr"),ix=g("ix"),hp=g("hp"),kn=g("kn"),an=g("an");
+  const line=(a,b,col,dash,w)=>{rx.strokeStyle=col;rx.setLineDash(dash?[10,8]:[]);rx.lineWidth=w||4;rx.lineCap="round";rx.beginPath();rx.moveTo(a.x,a.y);rx.lineTo(b.x,b.y);rx.stroke();rx.setLineDash([])};
+  const dot=(p,col)=>{rx.fillStyle=col;rx.beginPath();rx.arc(p.x,p.y,6,0,7);rx.fill()};
+  const arrow=(a,b)=>{const d=Math.hypot(b.x-a.x,b.y-a.y);if(d<10)return;const th=Math.atan2(b.y-a.y,b.x-a.x);
+    line(a,b,"#3ddc84",false,3);rx.fillStyle="#3ddc84";rx.beginPath();rx.moveTo(b.x,b.y);
+    rx.lineTo(b.x-14*Math.cos(th-.4),b.y-14*Math.sin(th-.4));rx.lineTo(b.x-14*Math.cos(th+.4),b.y-14*Math.sin(th+.4));rx.fill()};
+  const eA=ang(P.sh,P.el,P.wr),kA=ang(P.hp,P.kn,P.an);
+  const ph=t<cur.tDip-0.3?0:t<cur.tDip+0.05?1:t<cur.tRel-0.12?2:t<=cur.tRel+0.12?3:4;
+  const Lf=Math.hypot(wr.x-el.x,wr.y-el.y),Lu=Math.hypot(el.x-sh.x,el.y-sh.y),Lt=Math.hypot(hp.x-kn.x,hp.y-kn.y);
+  const gs=$("ghost").checked,swid=Math.hypot(sh.x-g("sh2").x,sh.y-g("sh2").y)||50;
+  let cap="Hazırlık: ayaklar omuz genişliğinde, dizler hafif bükülü, top göğüste, dirsekler içeride.",ok=null;
+  const G=(cond,good,bad)=>{ok=cond;cap=cond?good:bad};
+  const gleg=(deg)=>{const t1=Math.atan2(an.y-kn.y,an.x-kn.x),t2=Math.atan2(hp.y-kn.y,hp.x-kn.x);
+    const df=((t2-t1+3*Math.PI)%(2*Math.PI))-Math.PI,s=df>=0?1:-1,gt=t1+s*deg*Math.PI/180;
+    return {x:kn.x+Lt*Math.cos(gt),y:kn.y+Lt*Math.sin(gt)}};
+  if(!front)line({x:an.x,y:0},{x:an.x,y:H},"rgba(61,220,132,.55)",true,2);
+  else line({x:sh.x,y:0},{x:sh.x,y:H},"rgba(61,220,132,.55)",true,2);
+  if(ph===1){
+    if(front)cap="Çömelme: dizlerini bük, gövdeni dik tut (diz açısı önden çekimde ölçülmez).";
+    else{G(kA<=135,`Çömelme: diz açın ${Math.round(kA)}°, çok iyi (hedef 110–135°).`,`Çömelme: diz açın ${Math.round(kA)}°. Dizlerini daha fazla bük, hedef 110–135°. Yeşil çizgi dizin olması gereken konumu, ok kalçanın inmesi gereken yönü gösterir.`);
+      if(gs&&!ok){const gh=gleg(120);line(kn,gh,"rgba(61,220,132,.9)",true,6);arrow(hp,gh)}}
+  }else if(ph===2){
+    if(front){const fl=Math.abs(el.x-sh.x)/swid;G(fl<0.5,"Atış cebi: dirsek omuz hizasında, iyi.","Atış cebi: dirseğin dışarı açılıyor. Yeşil çizgi, dirseğin olması gereken omuz hizasını gösterir.");
+      if(gs&&!ok){const ge={x:sh.x,y:el.y};dot(ge,"#3ddc84");arrow(el,ge)}}
+    else{const tl=Math.atan2(Math.abs(wr.x-el.x),Math.abs(wr.y-el.y))*180/Math.PI;
+      G(tl<=20,`Atış cebi: önkol dikey, dirsek ${Math.round(eA)}° (hedef 80–120°). İyi.`,`Atış cebi: önkolun yatık. Dirseği topun altına getir, önkol dikey olsun (yeşil çizgi). Dirsek açın ${Math.round(eA)}°, hedef 80–120°.`);
+      if(gs&&!ok){const gw={x:el.x,y:el.y-Lf};line(el,gw,"rgba(61,220,132,.9)",true,6);arrow(wr,gw)}}
+  }else if(ph===3){
+    if(front){G(Math.abs(wr.x-sh.x)/swid<0.4,"Bırakma: top atış omzunun hizasında, iyi.","Bırakma: top omuz hizandan yana kayıyor. Yeşil çizgi omuz hizasını gösterir.");
+      if(gs&&!ok){const gw={x:sh.x,y:wr.y};dot(gw,"#3ddc84");arrow(wr,gw)}}
+    else{G(eA>=160&&kA>=160,`Bırakma: kol ${Math.round(eA)}°, bacak ${Math.round(kA)}°. İkisi de tam uzamış, iyi.`,`Bırakma: kol ${Math.round(eA)}°, bacak ${Math.round(kA)}° (ikisi de 160°+ olmalı). Yeşil çizgiler kolun ve bacağın tam uzamış halini, oklar uzatma yönünü gösterir.`);
+      if(gs){
+        if(eA<160){let dx=wr.x-sh.x,dy=wr.y-sh.y;const d=Math.hypot(dx,dy)||1;const gw={x:sh.x+dx/d*(Lu+Lf),y:sh.y+dy/d*(Lu+Lf)};line(sh,gw,"rgba(61,220,132,.9)",true,6);arrow(wr,gw)}
+        if(kA<160){let dx=kn.x-an.x,dy=kn.y-an.y;const d=Math.hypot(dx,dy)||1;const gh={x:kn.x+dx/d*Lt,y:kn.y+dy/d*Lt};line(kn,gh,"rgba(61,220,132,.9)",true,6);arrow(hp,gh)}}}
+  }else if(ph===4){
+    G(wr.y<sh.y-0.05*H,"Takip: kol yukarıda kalıyor, iyi. Bileğin ileri kırık olmalı (el aşağı baksın).","Takip: kolunu çok erken indiriyorsun. Top gidene kadar kolun yukarıda ve bilek ileri kırık kalmalı.");
+  }
+  [[sh,el],[el,wr],[wr,ix],[sh,hp],[hp,kn],[kn,an]].forEach(([a,b])=>line(a,b,"#ff5252"));
+  [sh,el,wr,hp,kn,an].forEach(p=>dot(p,"#fff"));
+  rx.font="bold 20px system-ui";rx.fillStyle="#ff9800";rx.fillText(NAMES[ph],10,26);
+  const e=$("cap");e.textContent=cap;e.className=ok===null?"":ok?"ok":"bad";
+}
+function tick(ts){
+  if(!playing)return;
+  tPos+=(ts-lastTs)/1000*parseFloat($("spd").value);lastTs=ts;
+  const fr=cur.frames;let i=fr.findIndex(f=>f.t>=tPos);
+  if(i<0){i=fr.length-1;playing=false;$("play").textContent="▶ Oynat";if(rec&&rec.state==="recording")rec.stop()}
+  $("sl").value=i;drawF(i);
+  if(playing)requestAnimationFrame(tick);
+}
+function play(){
+  if(!cur)return;
+  if(parseInt($("sl").value)>=cur.frames.length-1)tPos=cur.frames[0].t;
+  playing=true;lastTs=performance.now();$("play").textContent="⏸ Durdur";requestAnimationFrame(tick);
+}
+$("play").onclick=()=>{if(playing){playing=false;$("play").textContent="▶ Oynat"}else play()};
+$("sl").oninput=e=>{if(!cur)return;playing=false;$("play").textContent="▶ Oynat";const i=+e.target.value;tPos=cur.frames[i].t;drawF(i)};
+$("shotSel").onchange=e=>showShot(+e.target.value);
+$("ghost").onchange=()=>{if(cur)drawF(+$("sl").value)};
+$("dl").onclick=()=>{
+  if(!cur||!window.MediaRecorder){alert("Bu tarayıcı video kaydını desteklemiyor.");return}
+  const mime=["video/mp4","video/webm;codecs=vp9","video/webm"].find(m=>MediaRecorder.isTypeSupported(m));
+  chunks=[];rec=new MediaRecorder(rc.captureStream(30),mime?{mimeType:mime}:{});
+  rec.ondataavailable=e=>chunks.push(e.data);
+  rec.onstop=()=>{const b=new Blob(chunks,{type:rec.mimeType});const a=document.createElement("a");
+    a.href=URL.createObjectURL(b);a.download="atis-"+cur.n+(rec.mimeType.includes("mp4")?".mp4":".webm");a.click()};
+  rec.start();tPos=cur.frames[0].t;play();
+};
+
+// ---- rehber çizimi ----
+(function(){
+  const gc=$("gd"),x=gc.getContext("2d"),col=getComputedStyle(document.body).color;
+  const poses=[{s:8,t:-8,b:5,u:165,f:60,h:60,ball:0},{s:25,t:-35,b:15,u:165,f:60,h:60,ball:0},{s:15,t:-20,b:8,u:100,f:0,h:0,ball:1},{s:0,t:0,b:5,u:40,f:45,h:110,ball:2}];
+  const names=["Hazırlık","Çömelme","Atış cebi","Bırakma"];
+  const d=(p,a,l)=>({x:p.x+Math.sin(a*Math.PI/180)*l,y:p.y-Math.cos(a*Math.PI/180)*l});
+  poses.forEach((P,i)=>{
+    const an={x:i*160+75,y:205},kn=d(an,P.s,40),hp=d(kn,P.t,40),sh=d(hp,P.b,55),el=d(sh,P.u,30),wr=d(el,P.f,30),hd=d(sh,P.b,18),hn=d(wr,P.h,12);
+    x.lineCap="round";x.lineWidth=5;x.strokeStyle=col;
+    [[an,kn],[kn,hp],[hp,sh],[sh,el],[el,wr],[wr,hn]].forEach(([a,b])=>{x.beginPath();x.moveTo(a.x,a.y);x.lineTo(b.x,b.y);x.stroke()});
+    x.beginPath();x.arc(hd.x,hd.y,9,0,7);x.stroke();
+    const bl=P.ball===0?{x:sh.x+14,y:sh.y+22}:P.ball===1?d(wr,0,12):d(wr,60,40);
+    x.fillStyle="#ff9800";x.beginPath();x.arc(bl.x,bl.y,11,0,7);x.fill();
+    x.strokeStyle="#8886";x.lineWidth=2;x.beginPath();x.moveTo(i*160+20,208);x.lineTo(i*160+140,208);x.stroke();
+    x.fillStyle=col;x.font="bold 14px system-ui";x.fillText(names[i],i*160+40,226);
+  });
+})();
+</script>
+</body>
+</html>
